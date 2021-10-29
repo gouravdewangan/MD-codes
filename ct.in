@@ -1,0 +1,103 @@
+
+#--------------------------------- Variable Declaration ---------------------------------#
+#--------------------------------- Simulation parameters ---------------------------------#
+ variable Temp equal 300.0             #Temperature
+ variable runtime equal 50000          #Amount of timesteps
+ variable simsteps equal 100           #Dump every x timesteps
+ variable thermostep equal 100         #Dump thermo after every x timesteps
+ variable dt equal 0.001               #Duration of a timestep in picoseconds
+ variable dfp equal 2.566              #From RDF
+ variable VOL equal 4/3*PI*(v_dfp/2)^3 #dfp from RDF
+ variable str equal 2.0                #Strain rate
+
+#--------------------------------- 1. Initialization ---------------------------------#
+dimension 3
+boundary s s s
+units metal
+atom_style atomic
+timestep ${dt}
+
+#--------------------------------- 2. Atom definition ---------------------------------#
+read_data nanowire.lmp #Import generated nano tube
+
+# 2.1 Define region
+region Lower block INF INF INF INF INF 20 units box  # Defining lower grip
+region Upper block INF INF INF INF 225 INF units box # Defining upper grip
+region Grip union 2 Lower Upper                      # Combining both grip as one region
+
+# 2.1 Define group
+group Lower region Lower     # Defining lower grip as group
+group Upper region Upper     # Defining upper grip as group
+group Grip region Grip       # Defining Grip area as group
+group Gage subtract all Grip # Defining Gage area
+
+#--------------------------------- 3. Settings ---------------------------------#
+# 3.1 Interatomic potentials
+pair_style eam/alloy 
+pair_coeff * * CuAg.eam.alloy Ag Cu
+
+# 3.2 Minimization
+min_style cg
+minimize 1e-5 1e-5 1000 1000
+reset_timestep 0
+
+# 3.3 Fixes
+fix 1 all nvt temp ${Temp} ${Temp} $(100.0*v_dt) #NoseHoover temperature
+fix 2 Grip setforce 0 0 0                        #Set the forces to zero in Grip region 
+
+thermo ${thermostep}
+thermo_style custom step temp lx ly lz press pxx pyy pzz ke pe 
+log compression.equilibration
+run 7000
+
+# 3.4 Velocities
+velocity Upper set 0 0 -${str} #Applying strain to top and bottom part
+velocity Lower set 0 0 0
+
+# 3.5 Computes
+compute Hi_F Upper group/group Gage #Calculate total energy and force between upper Fixed part and the gage group
+compute Lo_F Lower group/group Gage #Calculate total energy and force between lower Fixed part and the gage group
+
+# 3.6 Stress Calculations
+variable tmp equal "245.4"                 #Length of simulation box
+variable Lz0 equal ${tmp}                  #Store in variable
+variable tmp delete                        #Delete temporary variable
+variable strain equal "(lz - v_Lz0)/v_Lz0" #Calculate strain level
+
+#--------------------------------- Calculate stress in all 3 dimensions ---------------------------------#
+variable stX equal "-pxx/10000"
+variable stY equal "-pyy/10000"
+variable stZ equal "-pzz/10000"
+compute ST all stress/atom NULL #Compute symmetric per-atom stress tensor for each atom in a group
+
+#--------------------------------- Calculate vonMises stress and store in variable ---------------------------------#
+variable p1 atom (c_ST[1]-c_ST[2])^2+(c_ST[1]-c_ST[3])^2+(c_ST[2]-c_ST[3])^2
+variable p2 atom 6*(c_ST[4]^2+c_ST[5]^2+c_ST[6]^2)
+variable vonST atom sqrt((v_p1+v_p2)/2)/v_VOL/10000 #In GPa
+compute pea all pe/atom                             #Compute potential energy per atom
+
+#--------------------------------- 3.5 Output files ---------------------------------#
+# 3.6.1 Print thermal data every x timesteps in log file
+thermo ${thermostep}
+
+# Print all relevant parameters - timestep, temperature, potential energy, kinetic energy, stress value
+thermo_style custom step v_strain temp v_stX v_stY v_stZ ke pe press
+
+# 3.6.2 Dump all atoms in LAMMPS trajectory file
+fix STPE all ave/atom 1 10 10 v_vonST c_pea                                           #Add vonMises stress calculation and Potential Energy to each atom in dump file for post-processing
+dump 1 all custom ${simsteps} compression_file id type xs ys zs vx vy vz f_STPE[1] f_STPE[2]
+dump_modify 1 format line "%d %d %.3f %.3f %.3f %.3f %.3f %.3f %.2f %.4f" 
+
+# dump 2 all movie ${simsteps} compression.avi type type adiam 2.0 size 1920 1080 #Dumping in movie format if required
+
+# 3.6.3 Calculate time averages and dump in text file
+fix 3 Gage ave/time 1 10 10 c_thermo_temp c_thermo_pe c_thermo_press c_Hi_F[3] c_Lo_F[3] file Compression_Temperature_Pressure.txt
+
+fix def1 all print 100 "${strain} ${stX} ${stY} ${stZ}" file compression_parameter.txt screen no
+
+#--------------------------------- 4. Run simulation ---------------------------------#
+run ${runtime}
+
+######################################
+# SIMULATION DONE
+print "All done"
